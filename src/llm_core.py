@@ -1143,6 +1143,9 @@ def _detect_provider(url: str) -> str:
         return "kimi-code"
     if _host_match(url, "moonshot.ai") or _host_match(url, "moonshot.cn"):
         return "moonshot"
+    from src.claude_subscription import is_claude_subscription_base
+    if is_claude_subscription_base(url):
+        return "claude-subscription"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
@@ -1380,6 +1383,8 @@ def _provider_label(url: str) -> str:
     if _host_match(url, "groq.com"): return "Groq"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
+    from src.claude_subscription import DISPLAY_NAME, is_claude_subscription_base
+    if is_claude_subscription_base(url): return DISPLAY_NAME
     from src.copilot import is_copilot_base
     if is_copilot_base(url): return "GitHub Copilot"
     if _host_match(url, "featherless.ai"): return "Featherless.ai"
@@ -1863,8 +1868,8 @@ def _convert_openai_content_to_anthropic(content):
                     "type": "image",
                     "source": {"type": "url", "url": url},
                 })
-        elif block.get("type") == "text":
-            converted.append(block)
+        elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+            converted.append({**block, "content": _convert_openai_content_to_anthropic(block["content"])})
         else:
             converted.append(block)
     return converted
@@ -1884,14 +1889,12 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
                 "content": [{
                     "type": "tool_result",
                     "tool_use_id": m.get("tool_call_id", ""),
-                    "content": m.get("content", ""),
+                    "content": _convert_openai_content_to_anthropic(m.get("content", "")),
                 }],
             })
         elif m.get("role") == "assistant" and isinstance(m.get("tool_calls"), list):
-            # Convert OpenAI assistant tool_calls to Anthropic format
-            content = []
-            if m.get("content"):
-                content.append({"type": "text", "text": m["content"]})
+            # Preserve structured blocks rather than wrapping a list as text.
+            content = _as_content_blocks(_convert_openai_content_to_anthropic(m.get("content")))
             for tc in m["tool_calls"]:
                 fn = tc.get("function") or {}
                 args_str = fn.get("arguments") or "{}"
@@ -2262,6 +2265,8 @@ def list_model_ids(
     if cached:
         return cached
     provider = _detect_provider(base_chat_url)
+    if provider == "claude-subscription":
+        return []  # Provisioned catalog only; no HTTP models endpoint.
     if provider == "anthropic":
         return list(ANTHROPIC_MODELS)
     try:
@@ -2358,6 +2363,11 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: Optional[f
              thinking_mode: Optional[str] = None,
              reasoning_effort: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
+    from src.claude_subscription import is_claude_subscription_base
+    if is_claude_subscription_base(url):
+        return asyncio.run(_subscription_completion(model, messages, headers=headers, timeout=timeout,
+                           temperature=temperature, max_tokens=max_tokens,
+                           thinking_mode=thinking_mode, reasoning_effort=reasoning_effort))
     temperature = model_customization.resolve_temperature(url, model, temperature)
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
@@ -2684,6 +2694,12 @@ async def llm_call_async(
     reasoning_effort: Optional[str] = None,
 ) -> str | tuple[str, str]:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    from src.claude_subscription import is_claude_subscription_base
+    if is_claude_subscription_base(url):
+        return await _subscription_completion(model, messages, headers=headers, timeout=timeout,
+                     temperature=temperature, max_tokens=max_tokens,
+                     thinking_mode=thinking_mode, reasoning_effort=reasoning_effort,
+                     return_model_metadata=return_model_metadata)
     temperature = model_customization.resolve_temperature(url, model, temperature)
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
@@ -2982,6 +2998,8 @@ async def llm_call_async(
 
 def _stream_target_url(url: str) -> str:
     provider = _detect_provider(url)
+    if provider == "claude-subscription":
+        return url
     if provider == "anthropic":
         return _normalize_anthropic_url(url)
     if provider == "ollama":
@@ -2991,12 +3009,56 @@ def _stream_target_url(url: str) -> str:
     return _normalize_openai_chat_url(url)
 
 
+async def _subscription_transport(headers, timeout):
+    from src import claude_subscription as provider
+    from src.claude_subscription_credentials import operator_source
+    token = provider.capability_from_headers(headers)
+    if not await asyncio.to_thread(provider.capability_is_valid, token):
+        raise provider.SubscriptionError(403, provider.NOT_CONNECTED)
+    return provider.Transport(operator_source(), timeout=timeout)
+
+
+async def _subscription_completion(model, messages, *, headers, timeout, return_model_metadata=False, **kwargs):
+    from src.claude_subscription import SubscriptionError
+    try:
+        transport = await _subscription_transport(headers, timeout)
+        response = await transport.complete(model, messages, **kwargs)
+        text = _parse_anthropic_response(response)
+        return (text, response.get("model") or model) if return_model_metadata else text
+    except SubscriptionError as exc:
+        raise _FallbackIneligibleHTTPException(exc.status, exc.message) from None
+
+
+async def _stream_subscription(model, messages, *, headers, timeout, **kwargs):
+    from src.claude_subscription import SubscriptionError
+    from contextlib import aclosing
+    try:
+        transport = await _subscription_transport(headers, timeout)
+        async with aclosing(transport.stream(model, messages, **kwargs)) as stream:
+            async for event in stream:
+                yield f"data: {json.dumps(event)}\n\n"
+    except SubscriptionError as exc:
+        yield f'event: error\ndata: {json.dumps({"status": exc.status, "text": exc.message, "fallback_eligible": False})}\n\n'
+        return
+    yield "data: [DONE]\n\n"
+
+
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: Optional[float] = None,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
                      tool_choice_none: bool = False, workload: str = "foreground",
                      thinking_mode: Optional[str] = None, reasoning_effort: Optional[str] = None):
+    from src.claude_subscription import is_claude_subscription_base
+    if is_claude_subscription_base(url):
+        from contextlib import aclosing
+        async with aclosing(_stream_subscription(model, messages, headers=headers, timeout=timeout,
+                   temperature=temperature, max_tokens=max_tokens, tools=tools,
+                   tool_choice_none=tool_choice_none, thinking_mode=thinking_mode,
+                   reasoning_effort=reasoning_effort)) as stream:
+            async for chunk in stream:
+                yield chunk
+        return
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         async for chunk in _stream_llm_inner(

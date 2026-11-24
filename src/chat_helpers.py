@@ -334,6 +334,10 @@ def model_supports_vision(
     OpenAI-compatible endpoints, and name-based detection otherwise."""
     if is_vision_model(model_name):
         return True
+    from src.claude_subscription import is_claude_subscription_base
+    if is_claude_subscription_base(endpoint_url):
+        # Native Claude Messages accepts images; do not probe the internal URL.
+        return True
     if endpoint_url:
         target_url = endpoint_url
         headers: Optional[dict] = None

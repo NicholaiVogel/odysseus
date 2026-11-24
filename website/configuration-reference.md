@@ -21,7 +21,7 @@ described as a switch that turns something off, the read rejects `0`, `false`,
 `no` and `off` and treats everything else as on. The `Default` column is the
 value the code falls back to when the variable is unset, quoted from the source.
 
-The source tree reads **150** `ODYSSEUS_*` variables: 92 an operator may want to set, and 58 that are internal - sentinels, fixture switches, capture hooks and development tooling. The internal ones are listed too, in their own section, so this page can be checked against the source mechanically.
+The source tree reads **153** `ODYSSEUS_*` variables: 95 an operator may want to set, and 58 that are internal - sentinels, fixture switches, capture hooks and development tooling. The internal ones are listed too, in their own section, so this page can be checked against the source mechanically.
 
 > This page is generated. Edit `scripts/generate_env_reference.py` and
 > re-run it; `tests/test_env_reference.py` enforces that the committed page
@@ -59,6 +59,9 @@ The source tree reads **150** `ODYSSEUS_*` variables: 92 an operator may want to
 | Variable | Default | Read in | What it does |
 |---|---|---|---|
 | `ODYSSEUS_ALLOW_LOCAL_IMAGE_MODELS` | `''` | `routes/gallery/gallery_routes.py` | Set to 1, true, yes or on to allow local image-generation and editing backends to be reachable as image providers. |
+| `ODYSSEUS_CLAUDE_SUBSCRIPTION_CLI_VERSION` | *unset* | `src/claude_subscription.py` | Claude Code compatibility User-Agent version for the local direct reference. Defaults to the detected installed CLI version (cached --version probe); set explicitly when no CLI is installed. No hardcoded stale fallback. |
+| `ODYSSEUS_CLAUDE_SUBSCRIPTION_CREDENTIALS_FILE` | `''` | `src/claude_subscription_credentials.py` | Explicit opt-in operator JSON file containing claudeAiOauth credentials for the local direct reference. Refresh writes rotated credentials back with POSIX locking; use a dedicated file, not a concurrently managed CLI login. |
+| `ODYSSEUS_CLAUDE_SUBSCRIPTION_TOKEN` | `''` | `src/claude_subscription_credentials.py` | Explicit opt-in static OAuth token for the local direct Claude subscription reference. Mutually exclusive with the credentials-file setting; no ambient credential discovery. |
 | `ODYSSEUS_COPILOT_API_VERSION` | `'2026-06-01'` | `src/copilot.py` | Dated API-version header the Copilot models and chat endpoints require. |
 | `ODYSSEUS_COPILOT_CLIENT_ID` | `'01ab8ac9400c4e429b23'` | `src/copilot.py` | GitHub OAuth client id for the Copilot device flow. The default is the public VS Code client id; override it only with your own allow-listed app. |
 | `ODYSSEUS_DEEPSEEK_REASONING_EFFORT` | `'high'` | `src/llm_core.py` | Reasoning effort for DeepSeek. Only `high` and `max` are accepted; any other value falls back to the default. |
@@ -303,7 +306,7 @@ reads three ways, because no single pattern covers the codebase:
   lines, so one read lives inside a string literal.
 
 The three passes are not redundancy. A line-based grep for a direct
-`os.environ.get("ODYSSEUS_...` call finds 118 of the 150 variables on this
+`os.environ.get("ODYSSEUS_...` call finds 121 of the 153 variables on this
 page. What it misses is reads through an env-reader helper, reads whose call
 spans more than one line, reads whose variable name is held in a module
 constant, and reads through a mapping passed in as an argument - which is the

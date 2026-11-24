@@ -43,6 +43,8 @@ def endpoint_cost_tracked(url: str, endpoint_kind: Optional[str] = None) -> bool
         path = (parsed.path or "").rstrip("/")
     except Exception:
         return False
+    if parsed.scheme == "claude-subscription":
+        return False  # Claude plan usage, not per-token billing
     if not host:
         return False
     if host == "chatgpt.com" and (
@@ -200,7 +202,14 @@ def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Opti
     api_key = getattr(ep, "api_key", None)
     auth_id = getattr(ep, "provider_auth_id", None)
     if auth_id:
-        from src.chatgpt_subscription import resolve_runtime_credentials
+        from src.claude_subscription import is_claude_subscription_base
+
+        if is_claude_subscription_base(base):
+            from src.claude_subscription import resolve_runtime_credentials, SubscriptionError, NOT_CONNECTED
+            if (getattr(ep, "owner", None) or None) != (owner or None) or not getattr(ep, "is_enabled", False):
+                raise SubscriptionError(403, NOT_CONNECTED)
+        else:
+            from src.chatgpt_subscription import resolve_runtime_credentials
 
         creds = resolve_runtime_credentials(auth_id, owner=owner)
         base = _rewrite_docker_host_for_native_runtime(
@@ -416,7 +425,7 @@ def build_models_url(base: str) -> Optional[str]:
         return _append_endpoint_path(_anthropic_api_root(base), "/v1/models")
     if provider == "ollama":
         return _append_endpoint_path(_ollama_api_root(base), "/tags")
-    if provider == "chatgpt-subscription":
+    if provider in ("chatgpt-subscription", "claude-subscription"):
         return None
     # Generic OpenAI-compatible fallback: local model servers with no explicit
     # path conventionally expose `/v1/models` (LM Studio, llama.cpp, vLLM).

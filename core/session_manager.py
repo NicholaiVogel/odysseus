@@ -586,7 +586,9 @@ class SessionManager:
     ) -> Session:
         """Create a new session and save to database."""
         from src.chatgpt_subscription import is_chatgpt_subscription_base
-        session_headers = {} if is_chatgpt_subscription_base(endpoint_url) else dict(headers or {})
+        from src.claude_subscription import is_claude_subscription_base
+        request_local_auth = is_chatgpt_subscription_base(endpoint_url) or is_claude_subscription_base(endpoint_url)
+        session_headers = {} if request_local_auth else dict(headers or {})
         endpoint_id = (endpoint_id or "").strip() or None
         thinking_mode = _seeded_thinking_mode(endpoint_url, model)
         db = SessionLocal()
