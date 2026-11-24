@@ -159,6 +159,40 @@ def test_concurrent_first_connects_leave_one_owner_and_one_endpoint(monkeypatch,
     assert [e.provider_auth_id for e in endpoints] == [a.id for a in auths]
 
 
+@pytest.mark.parametrize("foreign", [
+    # An unrelated endpoint whose id collides with a fixed id.
+    {"id": "claude-code", "provider_auth_id": "bob-auth"},
+    # Another account's endpoint still linked to this provider's auth row id.
+    {"id": "bob-ep", "provider_auth_id": "claude-code"},
+])
+def test_connect_never_takes_over_another_accounts_endpoint(db, foreign):
+    session = db()
+    try:
+        session.add(ModelEndpoint(
+            name="Bob's endpoint", base_url="https://api.example.com/v1", api_key="bob-key",
+            owner="bob", is_enabled=True, **foreign,
+        ))
+        session.commit()
+    finally:
+        session.close()
+    ccr._provision_endpoint("alice", MODELS)
+    session = db()
+    try:
+        bobs = session.query(ModelEndpoint).filter_by(id=foreign["id"]).one()
+        assert (bobs.owner, bobs.base_url, bobs.api_key, bobs.provider_auth_id) == (
+            "bob", "https://api.example.com/v1", "bob-key", foreign["provider_auth_id"],
+        )
+        auth = session.query(ProviderAuthSession).filter_by(provider=claude_code.PROVIDER).one()
+        mine = session.query(ModelEndpoint).filter_by(owner="alice").one()
+        assert (mine.provider_auth_id, mine.base_url) == (auth.id, claude_code.BASE_URL)
+        # Only alice's own endpoint keeps her capability valid.
+        mine.is_enabled = False
+        session.commit()
+        assert not claude_code.capability_is_valid(auth.access_token)
+    finally:
+        session.close()
+
+
 def test_connect_route_requires_admin(db, monkeypatch):
     def deny(request):
         raise HTTPException(403, "Admin only")

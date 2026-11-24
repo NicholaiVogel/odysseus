@@ -9,6 +9,7 @@ Claude login serves one Odysseus account, so a second account cannot connect it.
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -25,11 +26,10 @@ ALREADY_CONNECTED = (
     "Claude Code on this server is already connected to another Odysseus account. "
     "One Claude login serves one account."
 )
-# The connection's auth row and endpoint have fixed ids, so the database itself
-# rejects a second, concurrent first connect (from another request or server
-# worker) instead of letting two accounts each create one.
+# The connection's auth row has a fixed id, so the database itself rejects a
+# second, concurrent first connect (from another request or server worker)
+# instead of letting two accounts each create one.
 AUTH_ID = "claude-code"
-ENDPOINT_ID = "claude-code"
 
 
 class ClaudeCodeAlreadyConnected(RuntimeError):
@@ -47,6 +47,14 @@ def _invalidate_models_cache() -> None:
         invalidate()
     except Exception:
         pass
+
+
+def _new_id(db, model_cls) -> str:
+    for _ in range(8):
+        candidate = str(uuid.uuid4())[:8]
+        if db.query(model_cls).filter(model_cls.id == candidate).first() is None:
+            return candidate
+    return uuid.uuid4().hex[:12]
 
 
 def _provider_auths(db) -> List[Any]:
@@ -101,15 +109,17 @@ def _write_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, Any]:
             auth.access_token = claude_code.new_capability()
         auth.last_refresh = utcnow_naive()
 
+        # Reuse only this account's own endpoint for this connection. Never take
+        # over another endpoint, whatever its id or link says.
         ep = (
             db.query(ModelEndpoint)
-            .filter(ModelEndpoint.provider_auth_id == auth.id)
+            .filter(ModelEndpoint.provider_auth_id == auth.id, ModelEndpoint.owner == owner)
             .order_by(ModelEndpoint.created_at)
             .first()
-        ) or db.query(ModelEndpoint).filter(ModelEndpoint.id == ENDPOINT_ID).first()
+        )
         if ep is None:
             ep = ModelEndpoint(
-                id=ENDPOINT_ID,
+                id=_new_id(db, ModelEndpoint),
                 name=claude_code.DISPLAY_NAME,
                 base_url=claude_code.BASE_URL,
                 model_type="llm",
@@ -117,7 +127,6 @@ def _write_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, Any]:
                 owner=owner,
             )
             db.add(ep)
-        ep.owner = owner
         ep.base_url = claude_code.BASE_URL
         ep.api_key = None
         ep.provider_auth_id = auth.id

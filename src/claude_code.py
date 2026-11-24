@@ -493,7 +493,8 @@ def capability_from_headers(headers: Optional[Dict[str, Any]]) -> str:
 
 
 def capability_is_valid(token: Optional[str]) -> bool:
-    """True when ``token`` belongs to a connected, enabled Claude Code endpoint."""
+    """True when ``token`` belongs to a connected, enabled Claude Code endpoint
+    that is owned by the account that connected it."""
     if not token:
         return False
     ModelEndpoint, ProviderAuthSession, SessionLocal = _database_handles()
@@ -504,6 +505,7 @@ def capability_is_valid(token: Optional[str]) -> bool:
             if stored and hmac.compare_digest(stored.encode(), token.encode()):
                 return db.query(ModelEndpoint.id).filter(
                     ModelEndpoint.provider_auth_id == auth.id,
+                    ModelEndpoint.owner == auth.owner,
                     ModelEndpoint.is_enabled == True,  # noqa: E712 - SQLAlchemy comparison
                 ).first() is not None
         return False
