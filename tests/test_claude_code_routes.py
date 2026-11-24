@@ -8,7 +8,9 @@ owner, and the capability never lands in the sessions table.
 
 import asyncio
 import json
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi import HTTPException
@@ -109,6 +111,52 @@ def test_one_claude_login_serves_one_odysseus_account(db):
         ccr._provision_endpoint("bob", MODELS)
     auths, endpoints = _rows(db)
     assert [a.owner for a in auths] == ["alice"] and [e.owner for e in endpoints] == ["alice"]
+
+
+@pytest.mark.parametrize("owners", [("alice", "bob"), ("alice", "alice")])
+def test_concurrent_first_connects_leave_one_owner_and_one_endpoint(monkeypatch, tmp_path, owners):
+    # A file database gives each thread its own connection, like separate
+    # requests or server workers.
+    engine = create_engine(f"sqlite:///{tmp_path / 'race.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=engine)
+    Sessions = sessionmaker(bind=engine, autoflush=False)
+    monkeypatch.setattr(ccr, "SessionLocal", Sessions)
+    monkeypatch.setattr(
+        claude_code, "_database_handles", lambda: (ModelEndpoint, ProviderAuthSession, Sessions),
+    )
+    monkeypatch.setattr(ccr, "_invalidate_models_cache", lambda: None)
+
+    # Both connects read the empty table before either writes.
+    barrier = threading.Barrier(2)
+    waited = threading.local()
+    read = ccr._provider_auths
+
+    def read_then_wait(db):
+        rows = read(db)
+        if not getattr(waited, "done", False):
+            waited.done = True
+            barrier.wait(timeout=5)
+        return rows
+
+    monkeypatch.setattr(ccr, "_provider_auths", read_then_wait)
+
+    def connect(owner):
+        try:
+            ccr._provision_endpoint(owner, MODELS)
+            return owner
+        except ccr.ClaudeCodeAlreadyConnected:
+            return None
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            connected = [owner for owner in pool.map(connect, owners) if owner]
+        auths, endpoints = _rows(Sessions)
+    finally:
+        engine.dispose()
+    assert len(set(connected)) == 1
+    assert [a.owner for a in auths] == connected[:1]
+    assert [e.owner for e in endpoints] == connected[:1]
+    assert [e.provider_auth_id for e in endpoints] == [a.id for a in auths]
 
 
 def test_connect_route_requires_admin(db, monkeypatch):

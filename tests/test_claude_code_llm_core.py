@@ -134,6 +134,54 @@ def test_non_streaming_callers_get_the_collected_text(provider, monkeypatch):
     assert text == "Hello"
 
 
+class SilentCli:
+    """A Claude Code CLI that goes quiet at startup or mid-response."""
+
+    def __init__(self, stall_at):
+        self.stall_at = stall_at
+        self.calls = []
+
+    async def connect(self):
+        self.calls.append("connect")
+        if self.stall_at == "connect":
+            await asyncio.Event().wait()
+
+    async def get_server_info(self):
+        return {"account": {"apiProvider": "firstParty", "subscriptionType": "max"}}
+
+    async def query(self, prompt):
+        self.calls.append("query")
+
+    async def receive_response(self):
+        await asyncio.Event().wait()
+        yield None
+
+    async def interrupt(self):
+        self.calls.append("interrupt")
+
+    async def disconnect(self):
+        self.calls.append("disconnect")
+
+
+@pytest.mark.parametrize("stall_at", ["connect", "response"])
+def test_a_silent_cli_times_out_like_any_stream_and_is_ended(monkeypatch, stall_at):
+    cli = SilentCli(stall_at)
+    monkeypatch.setattr(claude_code, "_sdk_client", lambda options: cli)
+    monkeypatch.setattr(claude_code, "capability_is_valid", lambda token: token == "cap-good")
+
+    async def run():
+        return [
+            chunk async for chunk in llm_core.stream_llm(
+                URL, "claude-opus-5-5", MESSAGES, headers=GOOD, timeout=0.05,
+            )
+        ]
+
+    chunks = asyncio.run(asyncio.wait_for(run(), 5))
+    assert chunks[-1].startswith("event: error")
+    assert json.loads(chunks[-1].split("data:", 1)[1])["status"] == 504
+    assert cli.calls[-1] == "disconnect"
+
+
 def test_model_list_never_probes_http(monkeypatch):
     monkeypatch.setattr(llm_core, "_configured_cached_model_ids", lambda *a, **k: [])
     monkeypatch.setattr(llm_core, "httpx_get_kimi_aware", lambda *a, **k: pytest.fail("no HTTP for Claude Code"))

@@ -3035,6 +3035,7 @@ async def _stream_claude_code(
     messages: List[Dict],
     *,
     headers: Optional[Dict] = None,
+    timeout: Optional[float] = None,
     reasoning_effort: Optional[str] = None,
 ):
     """Claude Code provider: Odysseus SSE over :func:`src.claude_code.stream_events`.
@@ -3055,7 +3056,7 @@ async def _stream_claude_code(
     degenerate_guard = _DegenerateStreamGuard(model)
     actual_model = ""
     announced = False
-    stream = claude_code.stream_events(model, messages, effort=reasoning_effort)
+    stream = claude_code.stream_events(model, messages, effort=reasoning_effort, timeout=timeout)
     try:
         async for kind, value in stream:
             if kind == "model":
@@ -3125,7 +3126,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
 
     if provider == "claude-code":
         async for chunk in _stream_claude_code(
-            model, messages_copy, headers=headers, reasoning_effort=reasoning_effort,
+            model, messages_copy, headers=headers, timeout=timeout, reasoning_effort=reasoning_effort,
         ):
             yield chunk
         return

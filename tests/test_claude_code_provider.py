@@ -7,6 +7,7 @@ need claude-agent-sdk or a Claude login.
 """
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -340,6 +341,50 @@ def test_closing_the_stream_early_interrupts_the_cli():
     asyncio.run(run())
     assert client.interrupted
     assert client.disconnected
+
+
+def test_stop_still_ends_a_cli_that_ignores_the_interrupt(monkeypatch):
+    monkeypatch.setattr(claude_code, "INTERRUPT_TIMEOUT", 0.05, raising=False)
+
+    class DeafClient(FakeClient):
+        async def interrupt(self):
+            self.interrupted = True
+            await asyncio.Event().wait()
+
+    client = DeafClient([_delta("text_delta", str(n)) for n in range(50)])
+
+    async def run():
+        stream = claude_code.stream_events(
+            "claude-haiku-5-5", [{"role": "user", "content": "count"}], client_factory=_factory(client),
+        )
+        assert await stream.__anext__() == ("text", "0")
+        await stream.aclose()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+    assert client.interrupted
+    assert client.disconnected
+
+
+def test_model_refresh_timeout_ends_the_cli_before_returning(monkeypatch):
+    release = threading.Event()  # frees the worker if the deadline is not enforced
+    calls = []
+
+    class WedgedClient(FakeClient):
+        async def connect(self):
+            calls.append("connect")
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+
+        async def disconnect(self):
+            calls.append("disconnect")
+
+    monkeypatch.setattr(claude_code, "capability_is_valid", lambda token: True)
+    monkeypatch.setattr(claude_code, "_sdk_client", lambda options: WedgedClient([]))
+    try:
+        assert claude_code.models_for_capability_sync("cap", timeout=0.05) == []
+        assert calls == ["connect", "disconnect"]
+    finally:
+        release.set()
 
 
 def test_missing_sdk_is_a_clear_server_error(monkeypatch):

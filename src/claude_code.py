@@ -13,8 +13,9 @@ Claude sign-in of its own. The ``ProviderAuthSession`` row for this provider onl
 holds an Odysseus-internal capability token that binds the endpoint to the admin
 who connected it.
 
-Requests identify themselves as Odysseus through ``client_app``; Claude Code's
-own identity and telemetry are left exactly as published.
+Requests identify themselves as Odysseus through the SDK's client-app setting
+(``CLAUDE_AGENT_SDK_CLIENT_APP``, sent in the User-Agent); Claude Code's own
+identity and telemetry are left exactly as published.
 
 ``claude-agent-sdk`` is optional (it bundles the CLI and is large), so it is only
 imported when a request actually runs.
@@ -67,6 +68,16 @@ _ISOLATION_ARGS: Dict[str, Optional[str]] = {
 }
 _EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
+# Time limits. A wedged CLI must never hold a request, a concurrency slot or a
+# worker thread, so every wait on it is bounded. A request's ``timeout`` works
+# like an HTTP read timeout: no single wait (start-up, the first event, the
+# next event) may exceed it, however long the whole answer takes.
+DEFAULT_TIMEOUT = 300.0
+PROBE_TIMEOUT = 30.0
+# Stop sends an interrupt, then disconnects. A CLI that never acknowledges the
+# interrupt must not hold up the disconnect that ends it.
+INTERRUPT_TIMEOUT = 5.0
+
 TURN_FORMAT_NOTE = (
     "The conversation so far is given as <turn> blocks in order. Write only the "
     "assistant's reply to the last turn, without <turn> tags."
@@ -81,6 +92,7 @@ NOT_INSTALLED = (
     "(pip install claude-agent-sdk)."
 )
 NOT_CONNECTED = "Claude Code is not connected for this Odysseus account."
+NOT_RESPONDING = "Claude Code did not respond in time."
 RATE_LIMITED = "Claude plan usage limit reached. Retry after it resets."
 _ASSISTANT_ERRORS = {
     "authentication_failed": (401, NOT_SIGNED_IN),
@@ -298,22 +310,43 @@ def _require_plan_login(info: Optional[Dict[str, Any]]) -> None:
         raise ClaudeCodeError(401, NOT_SIGNED_IN)
 
 
-async def probe(*, client_factory: Optional[ClientFactory] = None) -> Dict[str, Any]:
+async def _within(awaitable: Any, seconds: float) -> Any:
+    """Await one step of the CLI with a deadline; a miss is a 504 like a read timeout."""
+    try:
+        return await asyncio.wait_for(awaitable, seconds)
+    except asyncio.TimeoutError as exc:
+        raise ClaudeCodeError(504, NOT_RESPONDING) from exc
+
+
+async def _end(client: Any, *, interrupt: bool) -> None:
+    """Stop the CLI and end its process. Never raises."""
+    if interrupt:
+        with suppress(Exception):
+            await asyncio.wait_for(client.interrupt(), INTERRUPT_TIMEOUT)
+    with suppress(Exception):
+        # No deadline here on purpose: the SDK bounds disconnect itself, and a
+        # foreign cancellation inside it would skip its terminate/kill
+        # escalation and leave the CLI process behind.
+        await client.disconnect()
+
+
+async def probe(
+    *, client_factory: Optional[ClientFactory] = None, timeout: float = PROBE_TIMEOUT,
+) -> Dict[str, Any]:
     """Start the CLI without sending a prompt and report its login and models.
 
     No API request is made: the CLI answers from its local state.
     """
     client = (client_factory or _sdk_client)(option_kwargs(None, ""))
     try:
-        await client.connect()
-        info = await client.get_server_info() or {}
+        await _within(client.connect(), timeout)
+        info = await _within(client.get_server_info(), timeout) or {}
     except ClaudeCodeError:
         raise
     except Exception as exc:
         raise _unexpected_error(exc) from exc
     finally:
-        with suppress(Exception):
-            await client.disconnect()
+        await _end(client, interrupt=False)
     account = info.get("account") or {}
     return {
         "signed_in": _plan_login(info),
@@ -363,15 +396,18 @@ async def stream_events(
     messages: Iterable[Dict[str, Any]],
     *,
     effort: Optional[str] = None,
+    timeout: Optional[float] = None,
     client_factory: Optional[ClientFactory] = None,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     """Run one request through the CLI.
 
     Yields ``("model", id)``, ``("thinking", text)``, ``("text", text)`` and a
     final ``("usage", {"input_tokens", "output_tokens"})``. Raises
-    :class:`ClaudeCodeError`. Closing the generator early (Stop) interrupts the
-    CLI so it stops generating, then ends the process.
+    :class:`ClaudeCodeError`; a CLI that stays silent for ``timeout`` seconds
+    (start-up included) is a 504. Closing the generator early (Stop) interrupts
+    the CLI so it stops generating, then ends the process.
     """
+    limit = timeout if timeout and timeout > 0 else DEFAULT_TIMEOUT
     system_prompt, content = fold_messages(messages)
     client = (client_factory or _sdk_client)(option_kwargs(model, system_prompt, effort=effort))
     completed = False
@@ -379,10 +415,15 @@ async def stream_events(
     streamed_text = False
     try:
         async with _slot():
-            await client.connect()
-            _require_plan_login(await client.get_server_info())
-            await client.query(_one_user_message(content))
-            async for message in client.receive_response():
+            await _within(client.connect(), limit)
+            _require_plan_login(await _within(client.get_server_info(), limit))
+            await _within(client.query(_one_user_message(content)), limit)
+            responses = client.receive_response().__aiter__()
+            while True:
+                try:
+                    message = await _within(responses.__anext__(), limit)
+                except StopAsyncIteration:
+                    break
                 event = getattr(message, "event", None)
                 if isinstance(event, dict):  # StreamEvent: a raw API stream event
                     if event.get("type") == "message_start":
@@ -421,11 +462,7 @@ async def stream_events(
     except Exception as exc:
         raise _unexpected_error(exc) from exc
     finally:
-        if not completed:
-            with suppress(Exception):
-                await client.interrupt()
-        with suppress(Exception):
-            await client.disconnect()
+        await _end(client, interrupt=not completed)
 
 
 # ── Authorization ───────────────────────────────────────────────────────────
@@ -491,7 +528,7 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None) -> Di
         db.close()
 
 
-def models_for_capability_sync(token: Optional[str], *, timeout: float = 30.0) -> List[str]:
+def models_for_capability_sync(token: Optional[str], *, timeout: float = PROBE_TIMEOUT) -> List[str]:
     """Model refresh for an already connected endpoint, callable from sync code.
 
     Only the connected owner's capability can make the server start the CLI.
@@ -500,7 +537,11 @@ def models_for_capability_sync(token: Optional[str], *, timeout: float = 30.0) -
         return []
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        info = pool.submit(asyncio.run, probe()).result(timeout=timeout)
+        # probe() enforces the deadline inside the worker's own event loop, so
+        # a wedged CLI is ended there instead of being left running with its
+        # thread. The outer wait is only a backstop for the SDK's own cleanup.
+        future = pool.submit(asyncio.run, probe(timeout=timeout))
+        info = future.result(timeout=2 * timeout + 60)
     except Exception as exc:
         logger.warning("Claude Code model refresh failed: %s", type(exc).__name__)
         return []

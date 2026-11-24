@@ -9,10 +9,10 @@ Claude login serves one Odysseus account, so a second account cannot connect it.
 import asyncio
 import json
 import logging
-import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 
 from core.database import ModelEndpoint, ProviderAuthSession, SessionLocal, utcnow_naive
 from core.middleware import require_admin
@@ -25,6 +25,11 @@ ALREADY_CONNECTED = (
     "Claude Code on this server is already connected to another Odysseus account. "
     "One Claude login serves one account."
 )
+# The connection's auth row and endpoint have fixed ids, so the database itself
+# rejects a second, concurrent first connect (from another request or server
+# worker) instead of letting two accounts each create one.
+AUTH_ID = "claude-code"
+ENDPOINT_ID = "claude-code"
 
 
 class ClaudeCodeAlreadyConnected(RuntimeError):
@@ -42,14 +47,6 @@ def _invalidate_models_cache() -> None:
         invalidate()
     except Exception:
         pass
-
-
-def _new_id(db, model_cls) -> str:
-    for _ in range(8):
-        candidate = str(uuid.uuid4())[:8]
-        if db.query(model_cls).filter(model_cls.id == candidate).first() is None:
-            return candidate
-    return uuid.uuid4().hex[:12]
 
 
 def _provider_auths(db) -> List[Any]:
@@ -82,8 +79,7 @@ def _connection_state(owner: Optional[str]) -> Dict[str, Any]:
         db.close()
 
 
-def _provision_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, Any]:
-    """Create or refresh this owner's Claude Code auth row and endpoint."""
+def _write_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         auths = _provider_auths(db)
@@ -92,7 +88,7 @@ def _provision_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, An
         auth = auths[0] if auths else None
         if auth is None:
             auth = ProviderAuthSession(
-                id=_new_id(db, ProviderAuthSession),
+                id=AUTH_ID,
                 provider=claude_code.PROVIDER,
                 owner=owner,
                 label=claude_code.DISPLAY_NAME,
@@ -110,10 +106,10 @@ def _provision_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, An
             .filter(ModelEndpoint.provider_auth_id == auth.id)
             .order_by(ModelEndpoint.created_at)
             .first()
-        )
+        ) or db.query(ModelEndpoint).filter(ModelEndpoint.id == ENDPOINT_ID).first()
         if ep is None:
             ep = ModelEndpoint(
-                id=_new_id(db, ModelEndpoint),
+                id=ENDPOINT_ID,
                 name=claude_code.DISPLAY_NAME,
                 base_url=claude_code.BASE_URL,
                 model_type="llm",
@@ -121,6 +117,7 @@ def _provision_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, An
                 owner=owner,
             )
             db.add(ep)
+        ep.owner = owner
         ep.base_url = claude_code.BASE_URL
         ep.api_key = None
         ep.provider_auth_id = auth.id
@@ -142,15 +139,26 @@ def _provision_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, An
         }
     finally:
         db.close()
+    return result
+
+
+def _provision_endpoint(owner: Optional[str], models: List[str]) -> Dict[str, Any]:
+    """Create or refresh this owner's Claude Code auth row and endpoint."""
+    try:
+        result = _write_endpoint(owner, models)
+    except IntegrityError:
+        # A concurrent first connect wrote the fixed-id rows first. Read them
+        # again: the same owner refreshes them, another owner gets the conflict.
+        result = _write_endpoint(owner, models)
     _invalidate_models_cache()
     return result
 
 
-async def _probe_or_502() -> Dict[str, Any]:
+async def _probe_or_http_error() -> Dict[str, Any]:
     try:
         return await claude_code.probe()
     except claude_code.ClaudeCodeError as exc:
-        raise HTTPException(503 if exc.status == 503 else 502, exc.message)
+        raise HTTPException(exc.status if exc.status in (503, 504) else 502, exc.message)
 
 
 async def status(request: Request) -> Dict[str, Any]:
@@ -169,7 +177,7 @@ async def connect(request: Request) -> Dict[str, Any]:
     """Create (or refresh) the calling admin's Claude Code endpoint."""
     require_admin(request)
     owner = _owner(request)
-    info = await _probe_or_502()
+    info = await _probe_or_http_error()
     if not info.get("signed_in"):
         raise HTTPException(409, claude_code.NOT_SIGNED_IN)
     models = info.get("models") or []
