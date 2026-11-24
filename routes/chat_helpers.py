@@ -968,13 +968,17 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
     owner = owner or getattr(sess, "owner", None)
     try:
         from src.chatgpt_subscription import is_chatgpt_subscription_base
-        is_chatgpt_subscription = is_chatgpt_subscription_base(getattr(sess, "endpoint_url", "") or "")
+        from src.claude_subscription import is_claude_subscription_base
+        endpoint_url = getattr(sess, "endpoint_url", "") or ""
+        # Session-backed providers (ChatGPT Subscription, Claude Subscription): the
+        # credential is resolved for each request and never persisted.
+        request_local_auth = is_chatgpt_subscription_base(endpoint_url) or is_claude_subscription_base(endpoint_url)
     except Exception:
-        is_chatgpt_subscription = False
+        request_local_auth = False
     has_auth = _has_auth_keys(sess.headers)
-    if has_auth and not is_chatgpt_subscription:
+    if has_auth and not request_local_auth:
         return
-    if is_chatgpt_subscription:
+    if request_local_auth:
         # Never reuse a stale bearer after deletion, disablement or failed refresh.
         sess.headers = {}
 
@@ -985,7 +989,7 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
             stored_q = db.query(DBSession).filter(DBSession.id == session_id)
             if owner:
                 stored_q = stored_q.filter(DBSession.owner == owner)
-            if is_chatgpt_subscription:
+            if request_local_auth:
                 stored = stored_q.first()
                 if stored is not None and _has_auth_keys(stored.headers):
                     stored_q.update({"headers": {}})
@@ -1016,7 +1020,7 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
                 # No usable key (e.g. ChatGPT Subscription needs re-auth).
                 return
             sess.headers = build_headers(api_key, base)
-            if is_chatgpt_subscription:
+            if request_local_auth:
                 # Request-local only; persistence was cleaned before resolution.
                 return
             update_q = db.query(DBSession).filter(DBSession.id == session_id)

@@ -148,7 +148,7 @@ def is_local_endpoint(url: str | None) -> bool:
 
 
 def is_subscription_endpoint(url: str | None) -> bool:
-    """ChatGPT Codex subscription endpoints are paid via subscription, not per-token."""
+    """Plan-billed endpoints (ChatGPT Codex, Claude Subscription) are paid via subscription, not per-token."""
     if not url:
         return False
     try:
@@ -156,6 +156,8 @@ def is_subscription_endpoint(url: str | None) -> bool:
         path = parts.path.rstrip("/")
     except ValueError:
         return False
+    if parts.scheme == "claude-subscription":
+        return True
     return parts.hostname == "chatgpt.com" and (
         path == "/backend-api/codex" or path.startswith("/backend-api/codex/")
     )

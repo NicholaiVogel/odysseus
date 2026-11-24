@@ -438,6 +438,23 @@ VARIABLE_NOTES: dict[str, tuple[str, str, str]] = {
         "failing. Unset keeps the generous read timeout, which makes a stalled "
         "backend look like a hung agent.",
     ),
+    "ODYSSEUS_CLAUDE_SUBSCRIPTION_TOKEN": (
+        "Model routing and providers", USER,
+        "Explicit opt-in static OAuth token for the local direct Claude subscription reference. "
+        "Mutually exclusive with the credentials-file setting; no ambient credential discovery.",
+    ),
+    "ODYSSEUS_CLAUDE_SUBSCRIPTION_CREDENTIALS_FILE": (
+        "Model routing and providers", USER,
+        "Explicit opt-in operator JSON file containing claudeAiOauth credentials for the "
+        "local direct reference. Refresh writes rotated credentials back with POSIX locking; "
+        "use a dedicated file, not a concurrently managed CLI login.",
+    ),
+    "ODYSSEUS_CLAUDE_SUBSCRIPTION_CLI_VERSION": (
+        "Model routing and providers", USER,
+        "Claude Code compatibility User-Agent version for the local direct reference. "
+        "Defaults to the detected installed CLI version (cached --version probe); "
+        "set explicitly when no CLI is installed. No hardcoded stale fallback.",
+    ),
     "ODYSSEUS_MISTRAL_REASONING_EFFORT": (
         "Model routing and providers", USER,
         "Reasoning effort sent to Mistral thinking-capable models. The API accepts "

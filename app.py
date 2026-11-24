@@ -830,6 +830,9 @@ app.include_router(setup_copilot_routes())
 # ChatGPT Subscription device-flow login
 from routes.chatgpt_subscription_routes import setup_chatgpt_subscription_routes
 app.include_router(setup_chatgpt_subscription_routes())
+# Local direct OAuth reference: explicit operator credentials, one owner
+from routes.claude_subscription_routes import setup_claude_subscription_routes
+app.include_router(setup_claude_subscription_routes())
 
 # TTS
 from routes.tts_routes import setup_tts_routes

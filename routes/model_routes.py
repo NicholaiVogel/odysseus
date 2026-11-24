@@ -772,7 +772,7 @@ def _safe_build_headers(api_key: Optional[str], base_url: str) -> dict:
 
 
 def _is_discovery_only_provider(provider: str) -> bool:
-    return provider == "chatgpt-subscription"
+    return provider in ("chatgpt-subscription", "claude-subscription")
 
 
 def _resolve_probe_key(ep) -> Optional[str]:
@@ -1056,6 +1056,10 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         if api_key:
             return fetch_available_models(api_key, timeout=timeout)
         return []
+    if provider == "claude-subscription":
+        # Local catalog only; no inference/refresh request during discovery.
+        from src.claude_subscription import models_for_capability_sync
+        return models_for_capability_sync(api_key, timeout=max(timeout, 15))
     if provider == "featherless" or _host_match(base, "featherless.ai"):
         return []
     if _is_google_api_base(base):
@@ -1484,8 +1488,11 @@ def _picker_models_for_endpoint(ep, base_url: str, kind: str):
 
 
 def _chatgpt_endpoint_visible(ep: Any, request: Request) -> bool:
+    """Session-backed provider endpoints (ChatGPT Subscription, Claude Subscription) are owner-private."""
     from src.chatgpt_subscription import is_chatgpt_subscription_base
-    if not is_chatgpt_subscription_base(getattr(ep, "base_url", "") or ""):
+    from src.claude_subscription import is_claude_subscription_base
+    base = getattr(ep, "base_url", "") or ""
+    if not (is_chatgpt_subscription_base(base) or is_claude_subscription_base(base)):
         return True
     try:
         user = effective_user(request)
@@ -1504,9 +1511,12 @@ def _provider_account_metadata(ep: Any) -> Dict[str, Any]:
     account_label = None
     try:
         from src.chatgpt_subscription import account_label_from_name, is_chatgpt_subscription_base
+        from src.claude_subscription import PROVIDER as CLAUDE_SUBSCRIPTION_PROVIDER, is_claude_subscription_base
         if is_chatgpt_subscription_base(base):
             provider = "chatgpt-subscription"
             account_label = account_label_from_name(getattr(ep, "name", None)) or None
+        elif is_claude_subscription_base(base):
+            provider = CLAUDE_SUBSCRIPTION_PROVIDER
     except Exception:
         provider = None
     return {"provider_auth_id": auth_id, "provider": provider, "account_label": account_label}
@@ -1727,7 +1737,9 @@ def setup_model_routes(model_discovery):
 
         for ep in endpoints:
             from src.chatgpt_subscription import is_chatgpt_subscription_base
-            if is_chatgpt_subscription_base(ep.base_url or "") and (ep.owner or None) != (owner or None):
+            from src.claude_subscription import is_claude_subscription_base
+            owner_private = is_chatgpt_subscription_base(ep.base_url or "") or is_claude_subscription_base(ep.base_url or "")
+            if owner_private and (ep.owner or None) != (owner or None):
                 continue
             base = _normalize_base(ep.base_url)
             provider = _safe_detect_provider(base)
