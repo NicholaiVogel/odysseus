@@ -34,6 +34,13 @@ soundfile; python_version >= "3.11" and python_version < "3.13"
 # Alternatives: SearXNG, Brave, Tavily, Serper, Google PSE.
 ddgs
 
+# Claude Code provider: Claude plan inference through the unmodified Claude Code
+# CLI, which this package bundles (no Node install). Install if you want to use
+# a Claude plan that an operator signed in on the server with `claude auth login`.
+# Exact pin per the 30-day release-age policy (#485); its bundled CLI (2.1.309)
+# has --safe-mode, --disable-slash-commands and --no-session-persistence.
+claude-agent-sdk==0.2.173
+
 # PDF form-filling feature (fillable AcroForm detection, field extraction,
 # value/annotation/signature stamping, page rendering for the form overlay).
 # NOTE: PyMuPDF is AGPL-3.0. Installing it brings AGPL obligations for a

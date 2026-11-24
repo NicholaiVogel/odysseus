@@ -1146,6 +1146,9 @@ def _detect_provider(url: str) -> str:
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
+    from src.claude_code import is_claude_code_base
+    if is_claude_code_base(url):
+        return "claude-code"
     from src.copilot import is_copilot_base
     if is_copilot_base(url):
         return "copilot"
@@ -1380,6 +1383,8 @@ def _provider_label(url: str) -> str:
     if _host_match(url, "groq.com"): return "Groq"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
+    from src.claude_code import DISPLAY_NAME as _CLAUDE_CODE_NAME, is_claude_code_base
+    if is_claude_code_base(url): return _CLAUDE_CODE_NAME
     from src.copilot import is_copilot_base
     if is_copilot_base(url): return "GitHub Copilot"
     if _host_match(url, "featherless.ai"): return "Featherless.ai"
@@ -2264,6 +2269,10 @@ def list_model_ids(
     provider = _detect_provider(base_chat_url)
     if provider == "anthropic":
         return list(ANTHROPIC_MODELS)
+    if provider == "claude-code":
+        # Models come from the CLI when the endpoint is connected; there is no
+        # HTTP /models endpoint to probe.
+        return []
     try:
         h = {}
         if headers:
@@ -2731,10 +2740,11 @@ async def llm_call_async(
             return cached_response, (_get_cached_response_model(cache_key) or model)
         return cached_response
 
-    if provider == "chatgpt-subscription":
+    if provider in ("chatgpt-subscription", "claude-code"):
         # ChatGPT/Codex requires streamed Responses requests even for callers
-        # that want a plain string (auto-title, memory extraction, etc.).
-        # Reuse stream_llm's validated Codex SSE path and collect deltas.
+        # that want a plain string (auto-title, memory extraction, etc.), and
+        # Claude Code only streams. Reuse stream_llm's validated path and
+        # collect deltas.
         parts: List[str] = []
         actual_model = model
         async for chunk in stream_llm(
@@ -2789,7 +2799,8 @@ async def llm_call_async(
                     if isinstance(reported_model, str) and reported_model.strip():
                         actual_model = reported_model.strip()
                 delta = data.get("delta")
-                if isinstance(delta, str):
+                # Thinking deltas are display-only; the collected reply is the answer.
+                if isinstance(delta, str) and not data.get("thinking"):
                     parts.append(delta)
         response = "".join(parts)
         _set_cached_response(cache_key, response, actual_model=actual_model)
@@ -2988,6 +2999,8 @@ def _stream_target_url(url: str) -> str:
         return _normalize_ollama_url(url)
     if provider == "chatgpt-subscription":
         return _normalize_chatgpt_subscription_url(url)
+    if provider == "claude-code":
+        return url
     return _normalize_openai_chat_url(url)
 
 
@@ -3015,6 +3028,67 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: Op
             reasoning_effort=reasoning_effort,
         ):
             yield chunk
+
+
+async def _stream_claude_code(
+    model: str,
+    messages: List[Dict],
+    *,
+    headers: Optional[Dict] = None,
+    timeout: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
+):
+    """Claude Code provider: Odysseus SSE over :func:`src.claude_code.stream_events`.
+
+    Model inference only, like ChatGPT Subscription: native ``tools`` never
+    reach this path and Odysseus' text tool protocol travels in the prompt. A
+    request runs only with the capability token that owner-scoped endpoint
+    resolution put in the session headers, because the CLI login on the server
+    belongs to the one account that connected it.
+    """
+    from src import claude_code
+
+    token = claude_code.capability_from_headers(headers)
+    if not await asyncio.to_thread(claude_code.capability_is_valid, token):
+        error = {"status": 403, "text": claude_code.NOT_CONNECTED, "fallback_eligible": False}
+        yield f'event: error\ndata: {json.dumps(error)}\n\n'
+        return
+    degenerate_guard = _DegenerateStreamGuard(model)
+    actual_model = ""
+    announced = False
+    stream = claude_code.stream_events(model, messages, effort=reasoning_effort, timeout=timeout)
+    try:
+        async for kind, value in stream:
+            if kind == "model":
+                actual_model = value
+                if not announced:
+                    model_event = _model_actual_event(model, value)
+                    if model_event:
+                        announced = True
+                        yield model_event
+            elif kind == "text":
+                degenerate = degenerate_guard.check(value)
+                if degenerate:
+                    yield degenerate
+                    return
+                yield _stream_delta_event(value)
+            elif kind == "thinking":
+                yield _stream_delta_event(value, thinking=True)
+            elif kind == "usage":
+                usage = _normalize_usage_counts(value.get("input_tokens", 0), value.get("output_tokens", 0))
+                if usage:
+                    _annotate_usage_model(usage, model, actual_model)
+                    yield f'data: {json.dumps({"type": "usage", "data": usage})}\n\n'
+    except claude_code.ClaudeCodeError as exc:
+        error = {"status": exc.status, "text": exc.message}
+        if not exc.fallback_eligible:
+            error["fallback_eligible"] = False
+        yield f'event: error\ndata: {json.dumps(error)}\n\n'
+        return
+    finally:
+        # Stop/disconnect or the degenerate guard: interrupt the CLI now.
+        await stream.aclose()
+    yield "data: [DONE]\n\n"
 
 
 async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: Optional[float] = None,
@@ -3049,6 +3123,13 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
     else:
         messages_copy = non_sys
+
+    if provider == "claude-code":
+        async for chunk in _stream_claude_code(
+            model, messages_copy, headers=headers, timeout=timeout, reasoning_effort=reasoning_effort,
+        ):
+            yield chunk
+        return
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)

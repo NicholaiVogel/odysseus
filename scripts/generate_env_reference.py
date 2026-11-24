@@ -479,6 +479,16 @@ VARIABLE_NOTES: dict[str, tuple[str, str, str]] = {
         "Model routing and providers", INTERNAL,
         "Editor-version header presented to the Copilot API. Kept stable on purpose.",
     ),
+    "ODYSSEUS_CLAUDE_CODE_MAX_CONCURRENCY": (
+        "Model routing and providers", USER,
+        "Most Claude Code CLI processes the Claude Code provider runs at once "
+        "(default 4); every request starts its own process.",
+    ),
+    "ODYSSEUS_CLAUDE_CODE_WORKDIR": (
+        "Model routing and providers", USER,
+        "Empty working directory the Claude Code CLI runs in, so nothing about the "
+        "host reaches its context. Defaults to odysseus-claude-code in the temp dir.",
+    ),
     "ODYSSEUS_DEBUG_LLM_SHAPE": (
         "Model routing and providers", INTERNAL,
         "Truthy logs the shape of streamed provider chunks. Debugging aid for "

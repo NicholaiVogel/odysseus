@@ -638,7 +638,9 @@ def setup_session_routes(
             resolved_key = endpoint_api_key
             resolved_base = endpoint_base_url
         from src.chatgpt_subscription import is_chatgpt_subscription_base
-        if resolved_key and not is_chatgpt_subscription_base(endpoint_url):
+        from src.claude_code import is_claude_code_base
+        request_local_auth = is_chatgpt_subscription_base(endpoint_url) or is_claude_code_base(endpoint_url)
+        if resolved_key and not request_local_auth:
             from src.endpoint_resolver import build_headers
             session.headers = build_headers(resolved_key, resolved_base)
             _persist_session_headers(sid, session.headers)
