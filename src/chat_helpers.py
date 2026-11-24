@@ -334,6 +334,11 @@ def model_supports_vision(
     OpenAI-compatible endpoints, and name-based detection otherwise."""
     if is_vision_model(model_name):
         return True
+    from src.claude_code import is_claude_code_base
+    if is_claude_code_base(endpoint_url):
+        # Every model the Claude Code CLI offers accepts images, and there is
+        # no HTTP endpoint to probe.
+        return True
     if endpoint_url:
         target_url = endpoint_url
         headers: Optional[dict] = None

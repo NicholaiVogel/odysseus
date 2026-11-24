@@ -830,6 +830,9 @@ app.include_router(setup_copilot_routes())
 # ChatGPT Subscription device-flow login
 from routes.chatgpt_subscription_routes import setup_chatgpt_subscription_routes
 app.include_router(setup_chatgpt_subscription_routes())
+# Claude Code: the server's own `claude auth login`, connected to one admin
+from routes.claude_code_routes import setup_claude_code_routes
+app.include_router(setup_claude_code_routes())
 
 # TTS
 from routes.tts_routes import setup_tts_routes

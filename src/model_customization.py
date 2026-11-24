@@ -42,7 +42,7 @@ def atomic_write_json(path: str, data: Any, **kwargs: Any) -> None:
     from core.atomic_io import atomic_write_json as write
     return write(path, data, **kwargs)
 
-EXCLUDED_PROVIDERS = frozenset({"anthropic", "chatgpt-subscription"})
+EXCLUDED_PROVIDERS = frozenset({"anthropic", "chatgpt-subscription", "claude-code"})
 
 OLLAMA_DEFAULT_PORT = 11434
 
